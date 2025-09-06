@@ -271,6 +271,13 @@ GREADER_API int greader_get_status_json(GClientHandle handle, const char** out_c
  */
 GREADER_API int greader_get_realtime_json(GClientHandle handle, const char** out_cstr, int* out_len);
 
+/** Query antenna count quickly.
+ * 语义：通过 EMESS_BaseGetCapabilities 读取 AntennaCount。
+ * @param handle 连接句柄。
+ * @return >=0 天线数量；失败返回 -1。
+ */
+GREADER_API int greader_get_antenna_count(GClientHandle handle);
+
 // We will add more functions like writing EPC data later.
 
 #ifdef __cplusplus

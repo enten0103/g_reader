@@ -849,7 +849,17 @@ GREADER_API int greader_inventory_epc_start(
             msg.Filter.BitLen = (int)n * 4;
         }
         debug_log("[GReaderDiag] Send InventoryEpc ae=%d mode=%d tidLen=%d to=%d", msg.AntennaEnable, (int)msg.InventoryMode, (int)msg.ReadTid.Len, (int)msg.Timeout);
-        SendSynMsgTimeoutRetry(client, EMESS_BaseInventoryEpc, &msg, 3000, 2);
+        // In continuous mode, some firmware won't send a completion quickly (or only after stop),
+        // leading to a host-side timeout even though inventory actually started and tags stream.
+        // To avoid spurious "Timeout" results, don't enforce a short host timeout when mode=1.
+        if (inventory_mode == 1) {
+            // Fire-and-ack style: rely on callbacks/events to observe progress.
+            SendSynMsg(client, EMESS_BaseInventoryEpc, &msg);
+        } else {
+            // Single-shot: honor caller-provided timeout if set, else use a safer default.
+            int host_timeout = timeout_ms > 0 ? timeout_ms : 5000;
+            SendSynMsgTimeoutRetry(client, EMESS_BaseInventoryEpc, &msg, host_timeout, 1);
+        }
         if (msg.rst.RtCode != 0 && err_buf && err_buf_len > 0) {
             std::snprintf(err_buf, err_buf_len, "%s", msg.rst.RtMsg);
         }
@@ -1172,4 +1182,21 @@ GREADER_API int greader_get_realtime_json(GClientHandle handle, const char** out
         return 1;
     }, "RealtimeSnapshot");
     return rc;
+}
+
+GREADER_API int greader_get_antenna_count(GClientHandle handle) {
+    auto* st = to_state(handle);
+    GClient* client = to_client(handle);
+    if (!client) return -1;
+    int result = -1;
+    (void)run_on_worker(st, [client, &result]() -> int {
+        MsgBaseGetCapabilities caps; std::memset(&caps, 0, sizeof(caps));
+        SendSynMsgTimeoutRetry(client, EMESS_BaseGetCapabilities, &caps, 1500, 1);
+        if (caps.rst.RtCode == 0) {
+            result = (int)caps.AntennaCount;
+            return 0;
+        }
+        return caps.rst.RtCode != 0 ? caps.rst.RtCode : -1;
+    }, "GetAntennaCount");
+    return result;
 }

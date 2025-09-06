@@ -60,6 +60,10 @@ typedef _GetRealtimeDart =
       ffi.Pointer<ffi.Int32>,
     );
 
+// antenna count
+typedef _GetAntennaCountNative = ffi.Int32 Function(ffi.Pointer<ffi.Void>);
+typedef _GetAntennaCountDart = int Function(ffi.Pointer<ffi.Void>);
+
 // base ops
 typedef _BaseStopNative =
     ffi.Int32 Function(ffi.Pointer<ffi.Void>, ffi.Pointer<ffi.Int8>, ffi.Int32);
@@ -327,6 +331,10 @@ class GReaderFfi {
       .lookupFunction<_GetRealtimeNative, _GetRealtimeDart>(
         'greader_get_realtime_json',
       );
+  late final _GetAntennaCountDart _getAntennaCount = _lib
+      .lookupFunction<_GetAntennaCountNative, _GetAntennaCountDart>(
+        'greader_get_antenna_count',
+      );
 
   String? diagNextJson() {
     final outStrPtr = pkg_ffi.malloc<ffi.Pointer<ffi.Int8>>();
@@ -366,6 +374,12 @@ class GReaderFfi {
       pkg_ffi.malloc.free(outStrPtr);
       pkg_ffi.malloc.free(outLenPtr);
     }
+  }
+
+  // Query antenna count quickly (>=0 on success, -1 on failure)
+  int getAntennaCount(ffi.Pointer<ffi.Void> handle) {
+    if (handle.address == 0) return -1;
+    return _getAntennaCount(handle);
   }
 
   // Query realtime JSON for a handle
@@ -504,13 +518,15 @@ class GReaderFfi {
     try {
       diagEmit('{"type":"DartHidOpenStart","len":${path.length}}');
     } catch (_) {}
-    // Important: Many vendor HID SDKs require all API calls to run on the same OS thread.
-    // To avoid disconnection on write (UsbHidRemoved), perform open on the main isolate/thread.
-    final h = GReaderFfi.instance.openUsbHid(
-      path,
-      timeoutSeconds: timeoutSeconds,
-    );
-    return h;
+    // Run the blocking open on a background isolate to avoid UI jank.
+    final addr = await Isolate.run<int>(() {
+      final h = GReaderFfi.instance.openUsbHid(
+        path,
+        timeoutSeconds: timeoutSeconds,
+      );
+      return h.address;
+    });
+    return ffi.Pointer.fromAddress(addr);
   }
 
   /// 枚举已连接的 USB HID 读写器设备路径。
@@ -1932,4 +1948,11 @@ class GReader {
   // ---- Lifecycle hooks ----
   Stream<void> onConnect() => _onConnectCtrl.stream;
   Stream<void> onDisconnect() => _onDisconnectCtrl.stream;
+
+  Future<int> getAntennaCount() async {
+    if (!isOpen) return -1;
+    // Run on a lightweight isolate to avoid any UI hiccup.
+    final addr = _handle;
+    return await Isolate.run(() => GReaderFfi.instance.getAntennaCount(addr));
+  }
 }

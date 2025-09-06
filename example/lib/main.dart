@@ -37,6 +37,9 @@ class _MyAppState extends State<MyApp> {
   bool _openingHid = false;
   bool _verbose = true;
   bool _busy = false; // 简单的操作互斥，避免重复点击造成卡顿感觉
+  // Antenna mask state
+  int _antennaCount = 0;
+  int _antennaMask = 0x1; // 默认至少启用天线1
   // Simple inputs for write/lock
   final _epcHexCtrl = TextEditingController(text: '300833B2DDD9014000000000');
   final _pwdHexCtrl = TextEditingController(text: '00000000');
@@ -98,6 +101,98 @@ class _MyAppState extends State<MyApp> {
     _diagSub?.cancel();
     _reader?.close();
     super.dispose();
+  }
+
+  Future<void> _refreshAntennaCount() async {
+    if (_reader?.isOpen == true) {
+      final n = await _reader!.getAntennaCount();
+      if (!mounted) return;
+      setState(() {
+        _antennaCount = n > 0 ? n.clamp(1, 16) : 0;
+        if (_antennaCount > 0) {
+          final limit = (1 << _antennaCount) - 1;
+          _antennaMask &= limit;
+          if (_antennaMask == 0) _antennaMask = 0x1;
+        } else {
+          _antennaMask = 0x1;
+        }
+      });
+    }
+  }
+
+  Widget _buildAntennaMask() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text('Antenna Mask'),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: _reader?.isOpen == true ? _refreshAntennaCount : null,
+              child: const Text('Refresh'),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: _antennaCount > 0
+                  ? () {
+                      setState(() {
+                        _antennaMask = (1 << _antennaCount) - 1;
+                      });
+                    }
+                  : null,
+              child: const Text('All'),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: _antennaCount > 0
+                  ? () {
+                      setState(() {
+                        _antennaMask = 0;
+                      });
+                    }
+                  : null,
+              child: const Text('None'),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              'count: $_antennaCount, mask: 0x${_antennaMask.toRadixString(16)}',
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        if (_antennaCount > 0)
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: List.generate(_antennaCount, (i) {
+              final bit = 1 << i;
+              final checked = (_antennaMask & bit) != 0;
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Checkbox(
+                    value: checked,
+                    onChanged: (v) {
+                      setState(() {
+                        if (v == true) {
+                          _antennaMask |= bit;
+                        } else {
+                          _antennaMask &= ~bit;
+                        }
+                        if (_antennaMask == 0) _antennaMask = bit; // 至少保留一个
+                      });
+                    },
+                  ),
+                  Text('ANT${i + 1}'),
+                ],
+              );
+            }),
+          )
+        else
+          const Text('Click Refresh to load antenna count.'),
+      ],
+    );
   }
 
   @override
@@ -251,6 +346,7 @@ class _MyAppState extends State<MyApp> {
                         if (ok) {
                           _reader!.registerCallbacks();
                           _listenReaderEvents();
+                          unawaited(_refreshAntennaCount());
                         }
                       } catch (e) {
                         if (!mounted) return;
@@ -278,6 +374,7 @@ class _MyAppState extends State<MyApp> {
                         if (ok) {
                           _reader!.registerCallbacks();
                           _listenReaderEvents();
+                          unawaited(_refreshAntennaCount());
                         }
                       } catch (e) {
                         if (!mounted) return;
@@ -305,6 +402,7 @@ class _MyAppState extends State<MyApp> {
                         if (ok) {
                           _reader!.registerCallbacks();
                           _listenReaderEvents();
+                          unawaited(_refreshAntennaCount());
                         }
                       } catch (e) {
                         if (!mounted) return;
@@ -354,6 +452,7 @@ class _MyAppState extends State<MyApp> {
                                 setState(() {
                                   _status = 'USB HID Open OK';
                                 });
+                                unawaited(_refreshAntennaCount());
                               } else {
                                 _reader = null;
                                 setState(() {
@@ -368,6 +467,9 @@ class _MyAppState extends State<MyApp> {
                   ),
                 ],
               ),
+              const SizedBox(height: 12),
+              // Antenna selection UI
+              _buildAntennaMask(),
               const SizedBox(height: 12),
               Wrap(
                 spacing: 8,
@@ -403,11 +505,34 @@ class _MyAppState extends State<MyApp> {
                         : () async {
                             setState(() => _busy = true);
                             try {
+                              final n = await _reader!.getAntennaCount();
+                              if (!mounted) return;
+                              setState(() {
+                                _status = 'AntennaCount: $n';
+                              });
+                              _pushEventUnique(
+                                convert.jsonEncode({
+                                  'type': 'AntennaCount',
+                                  'data': n,
+                                }),
+                              );
+                            } finally {
+                              if (mounted) setState(() => _busy = false);
+                            }
+                          },
+                    child: const Text('Get AntennaCount'),
+                  ),
+                  ElevatedButton(
+                    onPressed: _busy || _reader?.isOpen != true
+                        ? null
+                        : () async {
+                            setState(() => _busy = true);
+                            try {
                               final rt = await _reader!.getRealtime();
                               if (!mounted) return;
                               setState(() {
-                _status = 'Realtime:\n' +
-                  _prettyJson(rt ?? {'connected': false});
+                                _status =
+                                    'Realtime:\n${_prettyJson(rt ?? {'connected': false})}';
                               });
                               _pushEventUnique(
                                 convert.jsonEncode({
@@ -495,9 +620,18 @@ class _MyAppState extends State<MyApp> {
                             if (_reader?.isOpen != true) return;
                             setState(() => _busy = true);
                             try {
-                              final maskAnt1 = 0x1; // AntennaNo_1
+                              final n = await _reader!.getAntennaCount();
+                              // Use selected mask; bound by count if known
+                              int mask = _antennaMask;
+                              if (n > 0) {
+                                final capped = n.clamp(1, 16);
+                                mask &= (1 << capped) - 1;
+                                if (mask == 0) mask = 0x1;
+                              } else if (mask == 0) {
+                                mask = 0x1;
+                              }
                               final r = await _reader!.inventoryEpcStartAsync(
-                                antennaEnable: maskAnt1,
+                                antennaEnable: mask,
                                 inventoryMode: 1,
                                 filterArea: -1,
                                 readTidLen: 6, // 读取6个word（12字节）的TID，事件里才会有 tid
@@ -505,7 +639,7 @@ class _MyAppState extends State<MyApp> {
                               if (!mounted) return;
                               setState(
                                 () => _status =
-                                    'InvEPC code=${r.code} ${r.error ?? ''}',
+                                    'InvEPC code=${r.code} ${r.error ?? ''} (mask=0x${mask.toRadixString(16)})',
                               );
                             } finally {
                               if (mounted) setState(() => _busy = false);
@@ -514,44 +648,70 @@ class _MyAppState extends State<MyApp> {
                     child: const Text('Inventory EPC'),
                   ),
                   ElevatedButton(
-                    onPressed: () {
+                    onPressed: () async {
                       if (_reader?.isOpen != true) return;
-                      final maskAnt1 = 0x1;
+                      final n = await _reader!.getAntennaCount();
+                      int mask = _antennaMask;
+                      if (n > 0) {
+                        final capped = n.clamp(1, 16);
+                        mask &= (1 << capped) - 1;
+                        if (mask == 0) mask = 0x1;
+                      } else if (mask == 0) {
+                        mask = 0x1;
+                      }
                       final r = _reader!.inventoryGbStart(
-                        antennaEnable: maskAnt1,
+                        antennaEnable: mask,
                         inventoryMode: 1,
                       );
                       setState(
-                        () => _status = 'InvGB code=${r.code} ${r.error ?? ''}',
+                        () => _status =
+                            'InvGB code=${r.code} ${r.error ?? ''} (mask=0x${mask.toRadixString(16)})',
                       );
                     },
                     child: const Text('Inventory GB'),
                   ),
                   ElevatedButton(
-                    onPressed: () {
+                    onPressed: () async {
                       if (_reader?.isOpen != true) return;
-                      final maskAnt1 = 0x1;
+                      final n = await _reader!.getAntennaCount();
+                      int mask = _antennaMask;
+                      if (n > 0) {
+                        final capped = n.clamp(1, 16);
+                        mask &= (1 << capped) - 1;
+                        if (mask == 0) mask = 0x1;
+                      } else if (mask == 0) {
+                        mask = 0x1;
+                      }
                       final r = _reader!.inventoryGjbStart(
-                        antennaEnable: maskAnt1,
+                        antennaEnable: mask,
                         inventoryMode: 1,
                       );
                       setState(
-                        () =>
-                            _status = 'InvGJB code=${r.code} ${r.error ?? ''}',
+                        () => _status =
+                            'InvGJB code=${r.code} ${r.error ?? ''} (mask=0x${mask.toRadixString(16)})',
                       );
                     },
                     child: const Text('Inventory GJB'),
                   ),
                   ElevatedButton(
-                    onPressed: () {
+                    onPressed: () async {
                       if (_reader?.isOpen != true) return;
-                      final maskAnt1 = 0x1;
+                      final n = await _reader!.getAntennaCount();
+                      int mask = _antennaMask;
+                      if (n > 0) {
+                        final capped = n.clamp(1, 16);
+                        mask &= (1 << capped) - 1;
+                        if (mask == 0) mask = 0x1;
+                      } else if (mask == 0) {
+                        mask = 0x1;
+                      }
                       final r = _reader!.inventoryTlStart(
-                        antennaEnable: maskAnt1,
+                        antennaEnable: mask,
                         inventoryMode: 1,
                       );
                       setState(
-                        () => _status = 'InvTL code=${r.code} ${r.error ?? ''}',
+                        () => _status =
+                            'InvTL code=${r.code} ${r.error ?? ''} (mask=0x${mask.toRadixString(16)})',
                       );
                     },
                     child: const Text('Inventory TL'),
@@ -593,8 +753,17 @@ class _MyAppState extends State<MyApp> {
                         setState(() => _status = 'EPC过长，最大支持512个hex字符(256字节)');
                         return;
                       }
+                      // 使用 UI 选中的天线掩码
+                      int mask = _antennaMask;
+                      if (_antennaCount > 0) {
+                        final capped = _antennaCount.clamp(1, 16);
+                        mask &= (1 << capped) - 1;
+                        if (mask == 0) mask = 0x1;
+                      } else if (mask == 0) {
+                        mask = 0x1;
+                      }
                       final r = _reader!.writeEpcWithPc(
-                        antennaEnable: 0x1,
+                        antennaEnable: mask,
                         epcHex: epc,
                         passwordHex: _pwdHexCtrl.text.trim(),
                         block: 0,
@@ -603,8 +772,7 @@ class _MyAppState extends State<MyApp> {
                         filterBitStart: 0,
                       );
                       setState(() {
-                        _status =
-                            'WriteEPC (Filter TID:${tid ?? '-'}) code=${r.code} ${r.error ?? ''}';
+                        _status = 'WriteEPC (Filter TID:${tid ?? '-'}) code=${r.code} ${r.error ?? ''} (mask=0x${mask.toRadixString(16)})';
                       });
                     },
                     child: const Text('WriteEPC (Filter TID)'),
@@ -641,15 +809,24 @@ class _MyAppState extends State<MyApp> {
                         setState(() => _status = 'EPC过长，最大支持512个hex字符(256字节)');
                         return;
                       }
+                      // 使用 UI 选中的天线掩码
+                      int mask = _antennaMask;
+                      if (_antennaCount > 0) {
+                        final capped = _antennaCount.clamp(1, 16);
+                        mask &= (1 << capped) - 1;
+                        if (mask == 0) mask = 0x1;
+                      } else if (mask == 0) {
+                        mask = 0x1;
+                      }
                       final r = _reader!.writeEpcWithPc(
-                        antennaEnable: 0x1,
+                        antennaEnable: mask,
                         epcHex: epc,
                         passwordHex: _pwdHexCtrl.text.trim(),
                         block: 0,
                       );
                       setState(
                         () => _status =
-                            'WriteEPC code=${r.code} ${r.error ?? ''}',
+                            'WriteEPC code=${r.code} ${r.error ?? ''} (mask=0x${mask.toRadixString(16)})',
                       );
                     },
                     child: const Text('WriteEPC'),
@@ -659,14 +836,23 @@ class _MyAppState extends State<MyApp> {
                     onPressed: () {
                       if (_reader?.isOpen != true) return;
                       // mode per SDK: simple example use 0
+                      // 使用 UI 选中的天线掩码
+                      int mask = _antennaMask;
+                      if (_antennaCount > 0) {
+                        final capped = _antennaCount.clamp(1, 16);
+                        mask &= (1 << capped) - 1;
+                        if (mask == 0) mask = 0x1;
+                      } else if (mask == 0) {
+                        mask = 0x1;
+                      }
                       final r = _reader!.lockEpc(
-                        antennaEnable: 0x1,
+                        antennaEnable: mask,
                         mode: 0,
                         passwordHex: _pwdHexCtrl.text.trim(),
                       );
                       setState(
-                        () =>
-                            _status = 'LockEPC code=${r.code} ${r.error ?? ''}',
+                        () => _status =
+                            'LockEPC code=${r.code} ${r.error ?? ''} (mask=0x${mask.toRadixString(16)})',
                       );
                     },
                     child: const Text('LockEPC'),
@@ -685,10 +871,7 @@ class _MyAppState extends State<MyApp> {
                 ),
                 child: SelectableText(
                   _status,
-                  style: const TextStyle(
-                    fontFamily: 'monospace',
-                    height: 1.25,
-                  ),
+                  style: const TextStyle(fontFamily: 'monospace', height: 1.25),
                 ),
               ),
               const SizedBox(height: 12),

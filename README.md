@@ -1,6 +1,6 @@
 # greader_plugin (Windows)
 
-高性能的 Flutter Windows 插件，封装厂商 GReader SDK，通过 Dart FFI 提供稳定的 HID/串口/TCP 连接、盘点、写/锁 EPC 等能力，并内置丰富诊断日志与异常场景处理。
+高性能的 Flutter Windows 插件，封装厂商 GReader SDK，通过 Dart FFI 提供稳定的 HID/串口/TCP 连接、盘点、写/锁 EPC、状态/实时查询等能力，并内置丰富诊断日志与异常场景处理。
 
 > 平台与依赖
 >
@@ -9,92 +9,93 @@
 > - 插件内已内置厂商 SDK（windows/vendor/greader_sdk），构建时自动链接并拷贝运行库。
 > - 分发/上传时只需提交 `greader_plugin/` 文件夹即可。
 
+## 新增/变更（2025-09-06）
+
+- 新增 getAntennaCount API 并贯通至 Dart；示例新增按钮显示天线数。
+- 新增“按天线逐个选择”的 UI 复选框；盘点/写/锁统一使用所选天线掩码（至少保留一个）。
+- 修复连续模式 EPC 盘点出现“Timeout”误报的问题（连续模式使用无短时超时的发送路径）。
+- Open USB HID 改为后台 isolate 执行，避免卡顿 UI。
+- getStatus/getRealtime 输出更丰富（能力/功率/频段/基带/GPI/读写器信息等），并增强 UTF‑8/转义健壮性。
+- 增强 HID 拔出与 TCP 断开事件，确保能收到 `UsbHidRemoved`/`TcpDisconnected`。
+
 ## 快速开始
 
 - 列出 HID 并打开：
-	```dart
-	final devices = GReader.listUsbHid();
-	final reader = await GReader.openUsbHid(devices.first);
-	```
-- 盘点 EPC（同时读取 TID，便于后续过滤写入）：
-	```dart
-	final reader = await GReader.openUsbHid(devPath);
-	final inv = await reader.inventoryEpcStartAsync(
-		antennaEnable: 0x1,
-		readTidLen: 6, // 读取6字(96bit) TID，事件里才会包含 tid
-	);
-	// 推荐：通过回调(流)接收事件，而非手动轮询
-	// 取消订阅
-	await sub.cancel();
-		// 典型事件: {"type":"TagEpcLog","epc":"...","tid":"...","ant":1,"rssi":-40}
 
-	#### 强类型事件进阶示例：提取 TID 并定向写 EPC
+```dart
+final devices = GReader.listUsbHid();
+final reader = await GReader.openUsbHid(devices.first);
+```
 
-	```dart
-	final reader = await GReader.openUsbHid(devPath);
-	await reader.inventoryEpcStartAsync(antennaEnable: 0x1, readTidLen: 6);
+- 盘点 EPC（读取 TID 便于后续按 TID 过滤写入），并使用“所选天线掩码”：
 
-	String? lastTid;
-	final sub = reader.onEventTyped((ev) {
-		if (ev is GTagEpcLogEvent && (ev.tid?.isNotEmpty ?? false)) {
-			lastTid = ev.tid; // 缓存最近一次盘点到的 TID
-		}
-	});
+```dart
+final reader = await GReader.openUsbHid(devPath);
 
-	// 需要写入时（推荐 PC+EPC，从 startWord=1，并用 TID 过滤只写目标标签）
-	final epcHex = '300833B2DDD901400000000D';
-	if (lastTid == null) {
-		print('尚未读取到 TID，先进行盘点');
-	} else {
-		final r = await reader.writeEpcWithPcAsync(
-			antennaEnable: 0x1,
-			epcHex: epcHex,
-			passwordHex: '00000000',
-			block: 0,            // 建议整段写
-			filterArea: 2,       // 2 = TID
-			filterHex: lastTid,  // 仅写入匹配该 TID 的标签
-			filterBitStart: 0,
-		);
-		print('WriteEPC code=${r.code} ${r.error ?? ''}');
+// UI 中维护的选中掩码（至少一个 bit）
+int uiMask = 0x1;
+// 可选：根据设备天线数裁剪（推荐在连接成功后刷新一次）
+final n = await reader.getAntennaCount();
+if (n > 0) {
+	final capped = n.clamp(1, 16);
+	uiMask &= (1 << capped) - 1;
+	if (uiMask == 0) uiMask = 0x1;
+}
+
+await reader.inventoryEpcStartAsync(
+	antennaEnable: uiMask,
+	inventoryMode: 1,
+	readTidLen: 6, // 读取6字(96bit) TID，事件里才会包含 tid
+);
+
+// 推荐：使用强类型事件
+String? lastTid;
+final sub = reader.onEventTyped((ev) {
+	if (ev is GTagEpcLogEvent && (ev.tid?.isNotEmpty ?? false)) {
+		lastTid = ev.tid;
 	}
+});
+// ...需要时取消订阅
+await sub.cancel();
+```
 
-	await sub.cancel();
-	```
-	});
+- 强类型事件进阶：按 TID 过滤写 EPC（PC+EPC，从 startWord=1）：
 
-	// ...需要时取消订阅
-	await sub.cancel();
-	```
-- 停止：
-	```dart
-	await reader.baseStopAsync();
-	```
-- 写 EPC（推荐：PC+EPC，从字地址1开始，使用 TID 过滤只写目标标签）：
-	```dart
-	// 假设最近一次盘点缓存到的 tidHex
+```dart
+final epcHex = '300833B2DDD901400000000D';
+if (lastTid == null) {
+	print('尚未读取到 TID，先进行盘点');
+} else {
 	final r = await reader.writeEpcWithPcAsync(
-		antennaEnable: 0x1,
-		epcHex: '300833B2DDD901400000000D',
-		passwordHex: '00000000', // 可空字符串，表示无密码
-		block: 0,                 // 建议0，避免分块写失败
-		filterArea: 2,            // 2 = TID
-		filterHex: tidHex,
+		antennaEnable: uiMask,
+		epcHex: epcHex,
+		passwordHex: '00000000',
+		block: 0,            // 建议整段写
+		filterArea: 2,       // 2 = TID
+		filterHex: lastTid,  // 仅写入匹配该 TID 的标签
 		filterBitStart: 0,
 	);
-	if (r.code != 0) {
-		// r.error 为底层返回的失败原因
-	}
-	```
-- 锁 EPC：
-	```dart
-	final r = await reader.lockEpcAsync(
-		antennaEnable: 0x1,
-		area: 1,        // EPC 区
-		mode: 0,        // 厂商定义的锁定模式
-		passwordHex: '00000000',
-		// 可选 TID 过滤
-	);
-	```
+	print('WriteEPC code=${r.code} ${r.error ?? ''}');
+}
+```
+
+- 停止：
+
+```dart
+await reader.baseStopAsync();
+```
+
+- 锁 EPC（建议也按 TID 过滤）：
+
+```dart
+final r = await reader.lockEpcAsync(
+	antennaEnable: uiMask,
+	area: 2,       // EPC 区
+	mode: 0,       // 厂商定义锁定模式
+	passwordHex: '00000000',
+	// 可选 TID 过滤
+);
+```
 
 ## 事件与诊断
 
@@ -151,7 +152,8 @@ final sub = reader.onEventTyped((ev) {
 	}
 });
 
-// 取消订阅	nawait sub.cancel();
+// 取消订阅
+await sub.cancel();
 ```
 
 ## API 速览（高层 GReader）
@@ -185,22 +187,14 @@ final sub = reader.onEventTyped((ev) {
 	- `({int code, String? error}) setPower({int antennaNo=1, required int power})` / `Future<...> setPowerAsync(...)`
 
 - 盘点（参数说明）
-		- `({int code, String? error}) inventoryEpcStart({
-				required int antennaEnable,
-				int inventoryMode=1,
-				int filterArea=-1,
-				String? filterHex,
-				int filterBitStart=0,
-				int readTidLen=0,
-				int timeoutMs=0,
-			})`
-				- antennaEnable: 天线位图（0x1=天线1，0x3=1+2 ...）；
-				- inventoryMode: 0=单次；1=连续；
-				- filterArea: -1=不使用；0=保留；1=EPC；2=TID；3=用户；
-				- filterHex: 选择内容（HEX），为空表示不使用过滤；
-				- filterBitStart: 匹配起始位（匹配 EPC 常用 32）；
-				- readTidLen: TID 读取字数（0=不读；>0 指定，常用 6）；
-				- timeoutMs: 指令超时（毫秒，0=默认）。
+		- `({int code, String? error}) inventoryEpcStart({ required int antennaEnable, int inventoryMode=1, int filterArea=-1, String? filterHex, int filterBitStart=0, int readTidLen=0, int timeoutMs=0, })`
+			- antennaEnable: 天线位图（0x1=天线1，0x3=1+2 ...）。
+			- inventoryMode: 0=单次；1=连续。
+			- filterArea: -1=不使用；0=保留；1=EPC；2=TID；3=用户。
+			- filterHex: 选择内容（HEX），为空表示不使用过滤。
+			- filterBitStart: 起始位（匹配 EPC 常用 32）。
+			- readTidLen: TID 读取字数（0=不读；>0 指定，常用 6）。
+			- timeoutMs: 指令超时（毫秒，0=默认）。
 		- `Future<...> inventoryEpcStartAsync({...})` 异步版本。
 		- `inventoryGbStart`, `inventoryGjbStart`, `inventoryTlStart`（国标/军标/TL），参数为：天线位图/模式/超时。
 
@@ -268,6 +262,12 @@ final rt = await reader.getRealtime();
 - 必须先成功打开设备；对 HID 设备建议在 open 后稍作延时（插件已在原生侧做最小等待）。
 - 若只看到 `{"connected": true}`，多半是 JSON 被上层兜底（例如路径中含反斜杠/非 UTF-8 导致解析失败，现已在原生侧做了 UTF‑8 转换与转义）。请更新为当前版本并重试。
 - 少数字段取决于固件能力，旧固件可能缺省或为默认值。
+
+## 天线掩码最佳实践
+
+- 连接成功后调用 `getAntennaCount()` 并将 UI 掩码裁剪到 1..N 范围内；如果裁剪后为 0，至少保留 1（0x1）。
+- 在所有盘点/写/锁操作里复用同一 UI 掩码，避免不一致。
+- 上层可提供 All/None 快捷按钮与逐天线复选框（示例已实现）。
 
 
 ## 速查卡（参数对照）📌
