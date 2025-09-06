@@ -7,6 +7,7 @@
 > - 仅支持 Windows（x64）。
 > - 需要 Visual Studio 2022 C++ 工具链（编译示例时）。
 > - 插件内已内置厂商 SDK（windows/vendor/greader_sdk），构建时自动链接并拷贝运行库。
+> - 分发/上传时只需提交 `greader_plugin/` 文件夹即可。
 
 ## 快速开始
 
@@ -23,8 +24,42 @@
 		readTidLen: 6, // 读取6字(96bit) TID，事件里才会包含 tid
 	);
 	// 推荐：通过回调(流)接收事件，而非手动轮询
-	final sub = reader.onEvent((json) {
+	// 取消订阅
+	await sub.cancel();
 		// 典型事件: {"type":"TagEpcLog","epc":"...","tid":"...","ant":1,"rssi":-40}
+
+	#### 强类型事件进阶示例：提取 TID 并定向写 EPC
+
+	```dart
+	final reader = await GReader.openUsbHid(devPath);
+	await reader.inventoryEpcStartAsync(antennaEnable: 0x1, readTidLen: 6);
+
+	String? lastTid;
+	final sub = reader.onEventTyped((ev) {
+		if (ev is GTagEpcLogEvent && (ev.tid?.isNotEmpty ?? false)) {
+			lastTid = ev.tid; // 缓存最近一次盘点到的 TID
+		}
+	});
+
+	// 需要写入时（推荐 PC+EPC，从 startWord=1，并用 TID 过滤只写目标标签）
+	final epcHex = '300833B2DDD901400000000D';
+	if (lastTid == null) {
+		print('尚未读取到 TID，先进行盘点');
+	} else {
+		final r = await reader.writeEpcWithPcAsync(
+			antennaEnable: 0x1,
+			epcHex: epcHex,
+			passwordHex: '00000000',
+			block: 0,            // 建议整段写
+			filterArea: 2,       // 2 = TID
+			filterHex: lastTid,  // 仅写入匹配该 TID 的标签
+			filterBitStart: 0,
+		);
+		print('WriteEPC code=${r.code} ${r.error ?? ''}');
+	}
+
+	await sub.cancel();
+	```
 	});
 
 	// ...需要时取消订阅
@@ -65,6 +100,8 @@
 
 - `TagEpcLog`：携带 `epc`, `tid`, `ant`, `rssi` 等。
 - `TagEpcOver`：一轮 EPC 盘点结束。
+- `TagGbLog`/`TagGbOver`、`TagGjbLog`/`TagGjbOver`、`TagTLLog`/`TagTLOver`、`Tag6bLog`/`Tag6bOver`、`Tag6DLog`/`Tag6DOver`。
+- `GpiStart`/`GpiOver`。
 - `TcpDisconnected` / `UsbHidRemoved`：连接断开/设备拔出。
 - 通过 `GReader.setVerboseLogging(true)` 打开/关闭详细日志。
 
@@ -90,6 +127,33 @@ await sub.cancel();
 await diagSub.cancel();
 ```
 
+### 强类型事件（推荐）
+
+无需自己解析 JSON，使用内置类型模型：
+
+```dart
+final reader = await GReader.openUsbHid(devPath);
+await reader.inventoryEpcStartAsync(antennaEnable: 0x1, readTidLen: 6);
+
+final sub = reader.onEventTyped((ev) {
+	switch (ev.kind) {
+		case GEventKind.tagEpcLog:
+			final e = ev as GTagEpcLogEvent;
+			print('EPC=${e.epc} TID=${e.tid} ant=${e.ant} rssi=${e.rssi}');
+			break;
+		case GEventKind.tcpDisconnected:
+		case GEventKind.usbHidRemoved:
+			// 断开/拔出
+			break;
+		default:
+			// 其它事件可使用 ev.raw 读取原始字段
+			break;
+	}
+});
+
+// 取消订阅	nawait sub.cancel();
+```
+
 ## API 速览（高层 GReader）
 
 - 打开/关闭
@@ -105,6 +169,8 @@ await diagSub.cancel();
 	- `void registerCallbacks()`（通常在打开成功后立即调用）
 	- `String? nextEventJson()`（兼容用途，已不推荐）
 	- `StreamSubscription<String> onEvent(void Function(String) listener)` / `Stream<String> events()`
+	- `StreamSubscription<GEvent> onEventTyped(void Function(GEvent) listener)` / `Stream<GEvent> eventsTyped()`
+	- 事件模型：`GEventKind`、`GEvent`、`GTagEpcLogEvent`、`GSimpleEvent`
 
 - 基础操作
 	- `({int code, String? error}) baseStop()` / `Future<...> baseStopAsync()`

@@ -3,6 +3,7 @@ import 'dart:async';
 
 import 'package:flutter/services.dart';
 import 'package:greader_plugin/greader_plugin.dart';
+import 'dart:convert' as convert;
 // 使用高层封装 GReader，避免直接操作 FFI。
 
 void main() {
@@ -29,7 +30,7 @@ class _MyAppState extends State<MyApp> {
   );
   String _status = 'Idle';
   final List<String> _events = [];
-  StreamSubscription<String>? _evtSub;
+  StreamSubscription<dynamic>? _evtSub; // String 或 GEvent 订阅皆可
   StreamSubscription<String>? _diagSub;
   List<String> _hidList = const [];
   String? _selectedHid;
@@ -716,18 +717,16 @@ class _MyAppState extends State<MyApp> {
   void _listenReaderEvents() {
     _evtSub?.cancel();
     if (_reader?.isOpen == true) {
-      _evtSub = _reader!.onEvent((js) {
-        _pushEventUnique(js);
-        if (js.contains('"type":"TagEpcLog"')) {
-          try {
-            final m = RegExp(
-              '"type":"TagEpcLog".*?"epc":"(.*?)".*?"tid":"(.*?)"',
-            ).firstMatch(js);
-            if (m != null) {
-              final tid = m.group(2);
-              if (tid != null && tid.isNotEmpty) _lastTid = tid;
-            }
-          } catch (_) {}
+      // 使用强类型事件
+      _evtSub = _reader!.onEventTyped((ev) {
+        // 仍保留原始 JSON 展示
+        _pushEventUnique(
+          convert.jsonEncode(
+            ev.raw.isEmpty ? {'type': ev.kind.toString()} : ev.raw,
+          ),
+        );
+        if (ev is GTagEpcLogEvent && ev.tid != null && ev.tid!.isNotEmpty) {
+          _lastTid = ev.tid;
         }
         if (mounted) setState(() {});
       });

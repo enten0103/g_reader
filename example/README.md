@@ -40,4 +40,29 @@ await sub.cancel();
 await dsub.cancel();
 ```
 
+### 强类型事件（推荐）
+
+```dart
+final reader = await GReader.openUsbHid(devPath);
+await reader.inventoryEpcStartAsync(antennaEnable: 0x1, readTidLen: 6);
+
+final sub = reader.onEventTyped((ev) {
+	switch (ev.kind) {
+		case GEventKind.tagEpcLog:
+			final e = ev as GTagEpcLogEvent;
+			print('EPC=${e.epc} TID=${e.tid} ant=${e.ant} rssi=${e.rssi}');
+			break;
+		case GEventKind.tcpDisconnected:
+		case GEventKind.usbHidRemoved:
+			// 断开/拔出
+			break;
+		default:
+			// 其它事件可使用 ev.raw 读取原始字段
+			break;
+	}
+});
+
+await sub.cancel();
+```
+
 更多 API 与注意事项请查看仓库根目录的 README。

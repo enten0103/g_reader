@@ -728,6 +728,120 @@ class GReaderFfi {
   }
 }
 
+/// 事件枚举（来自原生回调的 JSON 字段 `type`）。
+enum GEventKind {
+  tagEpcLog,
+  tagEpcOver,
+  tagGbLog,
+  tagGbOver,
+  tagGjbLog,
+  tagGjbOver,
+  tagTlLog,
+  tagTlOver,
+  tag6bLog,
+  tag6bOver,
+  tag6DLog,
+  tag6DOver,
+  gpiStart,
+  gpiOver,
+  tcpDisconnected,
+  usbHidRemoved,
+  unknown,
+}
+
+/// Dart 侧强类型事件基类。
+abstract class GEvent {
+  final GEventKind kind;
+  final Map<String, dynamic> raw; // 原始 JSON map，便于取用额外字段
+  const GEvent(this.kind, this.raw);
+
+  static GEvent fromJson(String json) {
+    Map<String, dynamic> m;
+    try {
+      m = convert.jsonDecode(json) as Map<String, dynamic>;
+    } catch (_) {
+      return GUnknownEvent(json);
+    }
+    final t = (m['type'] ?? '').toString();
+    switch (t) {
+      case 'TagEpcLog':
+        return GTagEpcLogEvent(
+          epc: (m['epc'] ?? '').toString(),
+          tid: (m['tid']?.toString().isEmpty ?? true)
+              ? null
+              : m['tid'].toString(),
+          ant: _asIntOrNull(m['ant']),
+          rssi: _asIntOrNull(m['rssi']),
+          raw: m,
+        );
+      case 'TagEpcOver':
+        return GSimpleEvent(GEventKind.tagEpcOver, m);
+      case 'TagGbLog':
+        return GSimpleEvent(GEventKind.tagGbLog, m);
+      case 'TagGbOver':
+        return GSimpleEvent(GEventKind.tagGbOver, m);
+      case 'TagGjbLog':
+        return GSimpleEvent(GEventKind.tagGjbLog, m);
+      case 'TagGjbOver':
+        return GSimpleEvent(GEventKind.tagGjbOver, m);
+      case 'TagTLLog':
+        return GSimpleEvent(GEventKind.tagTlLog, m);
+      case 'TagTLOver':
+        return GSimpleEvent(GEventKind.tagTlOver, m);
+      case 'Tag6bLog':
+        return GSimpleEvent(GEventKind.tag6bLog, m);
+      case 'Tag6bOver':
+        return GSimpleEvent(GEventKind.tag6bOver, m);
+      case 'Tag6DLog':
+        return GSimpleEvent(GEventKind.tag6DLog, m);
+      case 'Tag6DOver':
+        return GSimpleEvent(GEventKind.tag6DOver, m);
+      case 'GpiStart':
+        return GSimpleEvent(GEventKind.gpiStart, m);
+      case 'GpiOver':
+        return GSimpleEvent(GEventKind.gpiOver, m);
+      case 'TcpDisconnected':
+        return GSimpleEvent(GEventKind.tcpDisconnected, m);
+      case 'UsbHidRemoved':
+        return GSimpleEvent(GEventKind.usbHidRemoved, m);
+      default:
+        return GSimpleEvent(GEventKind.unknown, m);
+    }
+  }
+
+  static int? _asIntOrNull(Object? v) {
+    if (v == null) return null;
+    if (v is int) return v;
+    return int.tryParse(v.toString());
+  }
+}
+
+/// 未知或解析失败的事件（保留原始 JSON 字符串）。
+class GUnknownEvent extends GEvent {
+  final String json;
+  GUnknownEvent(this.json) : super(GEventKind.unknown, const {});
+}
+
+/// EPC 盘点日志事件。
+class GTagEpcLogEvent extends GEvent {
+  final String epc;
+  final String? tid;
+  final int? ant;
+  final int? rssi;
+  GTagEpcLogEvent({
+    required this.epc,
+    this.tid,
+    this.ant,
+    this.rssi,
+    Map<String, dynamic> raw = const {},
+  }) : super(GEventKind.tagEpcLog, raw);
+}
+
+/// 仅携带类型与原始字段的简单事件。
+class GSimpleEvent extends GEvent {
+  const GSimpleEvent(super.kind, super.raw);
+}
+
 // Keep the original stub API minimal for now.
 class GreaderPlugin {
   static Future<String?> getPlatformVersionStatic() async {
@@ -756,6 +870,8 @@ class GReader {
   Timer? _eventsTimer;
   static StreamController<String>? _diagCtrl;
   static Timer? _diagTimer;
+  // typed events: 直接由 JSON 流映射生成，避免重复定时器
+  Stream<GEvent>? _typedEvents;
 
   GReader._(this._handle);
 
@@ -914,6 +1030,23 @@ class GReader {
     Duration interval = const Duration(milliseconds: 30),
   }) {
     return events(interval: interval).listen(listener);
+  }
+
+  // ---- Typed events (recommended) ----
+  Stream<GEvent> eventsTyped({
+    Duration interval = const Duration(milliseconds: 30),
+  }) {
+    _typedEvents ??= events(
+      interval: interval,
+    ).map(GEvent.fromJson).asBroadcastStream();
+    return _typedEvents!;
+  }
+
+  StreamSubscription<GEvent> onEventTyped(
+    void Function(GEvent event) listener, {
+    Duration interval = const Duration(milliseconds: 30),
+  }) {
+    return eventsTyped(interval: interval).listen(listener);
   }
 
   // Global diagnostics stream (library-wide), useful for debugging.
