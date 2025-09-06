@@ -45,6 +45,50 @@ static void debug_log(const char* fmt, ...) {
 #endif
 }
 
+// --- Small helpers: UTF-8 conversion and JSON escaping ---
+static std::string to_utf8_from_acp(const char* s) {
+    if (!s) return std::string();
+#ifdef _WIN32
+    if (*s == '\0') return std::string();
+    int wlen = MultiByteToWideChar(CP_ACP, 0, s, -1, NULL, 0);
+    if (wlen <= 0) return std::string(s);
+    std::wstring wbuf; wbuf.resize(wlen);
+    MultiByteToWideChar(CP_ACP, 0, s, -1, &wbuf[0], wlen);
+    int u8len = WideCharToMultiByte(CP_UTF8, 0, wbuf.c_str(), -1, NULL, 0, NULL, NULL);
+    if (u8len <= 0) return std::string();
+    std::string utf8; utf8.resize(u8len);
+    WideCharToMultiByte(CP_UTF8, 0, wbuf.c_str(), -1, &utf8[0], u8len, NULL, NULL);
+    if (!utf8.empty() && utf8.back() == '\0') utf8.pop_back();
+    return utf8;
+#else
+    return std::string(s);
+#endif
+}
+
+static std::string json_escape(const std::string& s) {
+    std::string out; out.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char buf[7];
+                    std::snprintf(buf, sizeof(buf), "\\u%04X", (unsigned)c);
+                    out += buf;
+                } else {
+                    out += (char)c;
+                }
+        }
+    }
+    return out;
+}
+
 GREADER_API void greader_set_verbose_logging(int enabled) {
     g_verbose.store(enabled ? 1 : 0);
 }
@@ -61,6 +105,7 @@ struct HandleState {
     std::string readerName; // provided at open
     std::string truncatedName; // vendor may truncate to 127 bytes
     bool isUsbHid{false}; // mark if this handle is USB HID
+    std::string transport; // rs232 / tcp / rs485 / usbhid
     // Avoid flooding: report UsbHidRemoved at most once per handle
     std::atomic<bool> usbHidRemovedReported{false};
     // When the handle was opened (for initial settle delay before first write)
@@ -386,7 +431,9 @@ GREADER_API GClientHandle greader_open_rs232(const char* conn_str, int timeout) 
         if (h) {
             auto* st = to_state(h);
             map_register(st, conn_str);
+            st->transport = "rs232";
             start_worker(st);
+            push_event(st, std::string("{\"type\":\"Connected\"}"));
         }
         return h;
     } else {
@@ -409,9 +456,11 @@ GREADER_API GClientHandle greader_open_tcpclient(const char* conn_str, int timeo
         if (h) {
             auto* st = to_state(h);
             map_register(st, conn_str);
+            st->transport = "tcp";
             start_worker(st);
             // Optional: give device a brief settle time to be ready for immediate writes
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            push_event(st, std::string("{\"type\":\"Connected\"}"));
         }
         return h;
     } else {
@@ -433,7 +482,9 @@ GREADER_API GClientHandle greader_open_rs485(const char* conn_str, int timeout) 
         if (h) {
             auto* st = to_state(h);
             map_register(st, conn_str);
+            st->transport = "rs485";
             start_worker(st);
+            push_event(st, std::string("{\"type\":\"Connected\"}"));
         }
         return h;
     } else {
@@ -582,6 +633,7 @@ GREADER_API GClientHandle greader_open_usbhid(const char* device_path, int timeo
         // Using the original device_path (UTF-8) may not match ACP candidate 'c', causing event loss.
     map_register(st, c.c_str());
     st->isUsbHid = true;
+                st->transport = "usbhid";
                 start_worker(st);
                 // Register callbacks immediately to avoid races before Dart registers
                 RegCallBack(st->client, ETagEpcLog, (void*)on_tag_epc_log);
@@ -591,6 +643,8 @@ GREADER_API GClientHandle greader_open_usbhid(const char* device_path, int timeo
                 push_event(st, "{\"type\":\"CallbacksRegistered\"}");
                 // also push summary into the handle's queue for UI association
                 push_event(st, std::string(j));
+                // Lifecycle connected
+                push_event(st, std::string("{\"type\":\"Connected\"}"));
             }
             // Also push to global diag for visibility
             push_diag(j);
@@ -693,6 +747,30 @@ GREADER_API void greader_close(GClientHandle handle) {
         st->client = nullptr;
     }
     delete st;
+}
+
+GREADER_API int greader_get_status_json(GClientHandle handle, const char** out_cstr, int* out_len) {
+    if (!handle || !out_cstr || !out_len) return 0;
+    auto* st = to_state(handle);
+    bool connected = st && st->client != nullptr;
+    std::string name = (st ? st->readerName : std::string());
+    std::string trans = (st ? st->transport : std::string());
+    bool isHid = st ? st->isUsbHid : false;
+    // Build a small JSON; we avoid querying version synchronously to keep this light.
+    char buf[1024];
+    auto name_u8 = json_escape(to_utf8_from_acp(name.c_str()));
+    auto trans_u8 = json_escape(to_utf8_from_acp(trans.c_str()));
+    std::snprintf(buf, sizeof(buf),
+        "{\"connected\":%s,\"readerName\":\"%s\",\"transport\":\"%s\",\"isUsbHid\":%s}",
+        connected ? "true" : "false",
+        name_u8.c_str(), trans_u8.c_str(), isHid ? "true" : "false");
+    size_t n = std::strlen(buf);
+    char* out = (char*)::malloc(n + 1);
+    if (!out) return 0;
+    std::memcpy(out, buf, n + 1);
+    *out_cstr = out;
+    *out_len = (int)n;
+    return 1;
 }
 
 GREADER_API int greader_base_stop(GClientHandle handle, char* err_buf, int err_buf_len) {
@@ -993,4 +1071,105 @@ GREADER_API int greader_diag_next_json(const char** out_cstr, int* out_len) {
 GREADER_API void greader_diag_emit(const char* json_utf8) {
     if (!json_utf8) return;
     push_diag(json_utf8);
+}
+
+GREADER_API int greader_get_realtime_json(GClientHandle handle, const char** out_cstr, int* out_len) {
+    if (!handle || !out_cstr || !out_len) return 0;
+    auto* st = to_state(handle);
+    GClient* client = to_client(handle);
+    if (!client) return 0;
+    // 在工作线程上串行执行，避免与其他命令并发
+    int rc = run_on_worker(st, [st, client, out_cstr, out_len]() -> int {
+        ensure_settle_delay(st, 300);
+    // 读取器能力
+    MsgBaseGetCapabilities caps; std::memset(&caps, 0, sizeof(caps));
+        SendSynMsgTimeoutRetry(client, EMESS_BaseGetCapabilities, &caps, 1500, 1);
+        // 功率（简化：查询读功率）
+        MsgBaseGetPower pwr; std::memset(&pwr, 0, sizeof(pwr));
+    pwr.setReadOrWrite = true; // 0=read, 1=write
+    pwr.ReadOrWrite = 0;
+        SendSynMsgTimeoutRetry(client, EMESS_BaseGetPower, &pwr, 1500, 1);
+        // 频段
+        MsgBaseGetFreqRange fr; std::memset(&fr, 0, sizeof(fr));
+        SendSynMsgTimeoutRetry(client, EMESS_BaseGetFreqRange, &fr, 1500, 1);
+        // 基带
+        MsgBaseGetBaseband bb; std::memset(&bb, 0, sizeof(bb));
+        SendSynMsgTimeoutRetry(client, EMESS_BaseGetBaseband, &bb, 1500, 1);
+        // GPI 状态
+        MsgAppGetGpiState gpi; std::memset(&gpi, 0, sizeof(gpi));
+        SendSynMsgTimeoutRetry(client, EMESS_AppGetGpiState, &gpi, 1500, 1);
+        // 读写器信息（上电时间等）
+        MsgAppGetReaderInfo info; std::memset(&info, 0, sizeof(info));
+        SendSynMsgTimeoutRetry(client, EMESS_AppGetReaderInfo, &info, 1500, 1);
+
+        // 事件队列长度（近似）
+        int evtq = 0; {
+            std::lock_guard<std::mutex> lk(st->events->mtx);
+            evtq = (int)st->events->q.size();
+        }
+
+    // 组装简单 JSON（为稳妥避免转义复杂性，逐字段拼接）
+        std::string json = "{";
+    json += "\"connected\":" + std::string(st->client?"true":"false");
+    auto rn_u8 = json_escape(to_utf8_from_acp(st->readerName.c_str()));
+    auto tp_u8 = json_escape(to_utf8_from_acp(st->transport.c_str()));
+    json += ",\"readerName\":\"" + rn_u8 + "\"";
+    json += ",\"transport\":\"" + tp_u8 + "\"";
+        json += ",\"isUsbHid\":" + std::string(st->isUsbHid?"true":"false");
+        // 能力
+        json += ",\"capabilities\":{";
+        json += "\"maxPower\":" + std::to_string((int)caps.MaxPower);
+        json += ",\"minPower\":" + std::to_string((int)caps.MinPower);
+        json += ",\"antennaCount\":" + std::to_string((int)caps.AntennaCount);
+        json += "}";
+        // 功率（仅取 DicPower[0..DicCount-1]）
+        json += ",\"power\":[";
+        for (int i=0;i<(int)pwr.DicCount;i++){
+            if (i) json += ",";
+            json += "{";
+            json += "\"antenna\":" + std::to_string((int)pwr.DicPower[i].AntennaNo);
+            json += ",\"read\":" + std::to_string((int)pwr.DicPower[i].Power);
+            json += "}";
+        }
+        json += "]";
+        // 频段索引
+        json += ",\"freqRangeIndex\":" + std::to_string((int)fr.FreqRangeIndex);
+        // 基带（只列出关键项）
+        json += ",\"baseband\":{";
+        json += "\"baseSpeed\":" + std::to_string((int)bb.BaseSpeed);
+        json += ",\"qValue\":" + std::to_string((int)bb.QValue);
+        json += ",\"session\":" + std::to_string((int)bb.Session);
+        json += ",\"inventoryFlag\":" + std::to_string((int)bb.InventoryFlag);
+        json += "}";
+        // GPI 状态
+        json += ",\"gpi\":[";
+        for (int i=0;i<(int)gpi.DicGpiCount;i++){
+            if (i) json += ",";
+            json += "{";
+            json += "\"port\":" + std::to_string((int)gpi.DicGpi[i].GpiIndex);
+            json += ",\"level\":" + std::to_string((int)gpi.DicGpi[i].Gpi);
+            json += "}";
+        }
+        json += "]";
+        // 上电时间/应用版本
+    json += ",\"readerInfo\":{";
+    auto serial_u8 = json_escape(to_utf8_from_acp(info.SerialNum));
+    auto appver_u8 = json_escape(to_utf8_from_acp(info.AppVersion));
+    auto poweron_u8 = json_escape(to_utf8_from_acp(info.PowerOnTime));
+    json += "\"serial\":\""; json += serial_u8; json += "\"";
+    json += ",\"appVersion\":\""; json += appver_u8; json += "\"";
+    json += ",\"powerOnTime\":\""; json += poweron_u8; json += "\"";
+        json += "}";
+        // 事件队列长度
+        json += ",\"pendingEvents\":" + std::to_string(evtq);
+        json += "}";
+
+        char* buf = (char*)::malloc(json.size() + 1);
+        if (!buf) return 0;
+        std::memcpy(buf, json.c_str(), json.size() + 1);
+        *out_cstr = buf;
+        *out_len = (int)json.size();
+        return 1;
+    }, "RealtimeSnapshot");
+    return rc;
 }

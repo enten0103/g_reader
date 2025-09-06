@@ -33,6 +33,32 @@ typedef _EventsNextDart =
     );
 typedef _FreeCStrNative = ffi.Void Function(ffi.Pointer<ffi.Int8>);
 typedef _FreeCStrDart = void Function(ffi.Pointer<ffi.Int8>);
+// get status
+typedef _GetStatusNative =
+    ffi.Int32 Function(
+      ffi.Pointer<ffi.Void>,
+      ffi.Pointer<ffi.Pointer<ffi.Int8>>,
+      ffi.Pointer<ffi.Int32>,
+    );
+typedef _GetStatusDart =
+    int Function(
+      ffi.Pointer<ffi.Void>,
+      ffi.Pointer<ffi.Pointer<ffi.Int8>>,
+      ffi.Pointer<ffi.Int32>,
+    );
+// get realtime snapshot
+typedef _GetRealtimeNative =
+    ffi.Int32 Function(
+      ffi.Pointer<ffi.Void>,
+      ffi.Pointer<ffi.Pointer<ffi.Int8>>,
+      ffi.Pointer<ffi.Int32>,
+    );
+typedef _GetRealtimeDart =
+    int Function(
+      ffi.Pointer<ffi.Void>,
+      ffi.Pointer<ffi.Pointer<ffi.Int8>>,
+      ffi.Pointer<ffi.Int32>,
+    );
 
 // base ops
 typedef _BaseStopNative =
@@ -223,6 +249,12 @@ typedef _DiagNextDart =
 typedef _DiagEmitNative = ffi.Void Function(ffi.Pointer<ffi.Int8>);
 typedef _DiagEmitDart = void Function(ffi.Pointer<ffi.Int8>);
 
+/// 底层 FFI 映射：与原生 C 接口 1:1 对应，参数均为基础类型/指针。
+///
+/// 注意：
+/// - 所有十六进制字符串（如 EPC/TID/密码）需为不含空格的 HEX，大写/小写均可；
+/// - HID 打开建议在主 Isolate 上调用；
+/// - 返回的 JSON 字符串均为 UTF-8，内部已处理转义。
 class GReaderFfi {
   GReaderFfi._();
   static final GReaderFfi instance = GReaderFfi._();
@@ -287,6 +319,14 @@ class GReaderFfi {
       .lookupFunction<_DiagNextNative, _DiagNextDart>('greader_diag_next_json');
   late final _DiagEmitDart _diagEmit = _lib
       .lookupFunction<_DiagEmitNative, _DiagEmitDart>('greader_diag_emit');
+  late final _GetStatusDart _getStatus = _lib
+      .lookupFunction<_GetStatusNative, _GetStatusDart>(
+        'greader_get_status_json',
+      );
+  late final _GetRealtimeDart _getRealtime = _lib
+      .lookupFunction<_GetRealtimeNative, _GetRealtimeDart>(
+        'greader_get_realtime_json',
+      );
 
   String? diagNextJson() {
     final outStrPtr = pkg_ffi.malloc<ffi.Pointer<ffi.Int8>>();
@@ -307,7 +347,53 @@ class GReaderFfi {
 
   void close(ffi.Pointer<ffi.Void> handle) => _close(handle);
 
+  // Query status JSON for a handle
+  String? getStatusJson(ffi.Pointer<ffi.Void> handle) {
+    if (handle.address == 0) {
+      return '{"connected":false}';
+    }
+    final outStrPtr = pkg_ffi.malloc<ffi.Pointer<ffi.Int8>>();
+    final outLenPtr = pkg_ffi.malloc<ffi.Int32>();
+    try {
+      final ok = _getStatus(handle, outStrPtr, outLenPtr);
+      if (ok == 0) return null;
+      final ptr = outStrPtr.value;
+      final len = outLenPtr.value;
+      final s = ptr.cast<pkg_ffi.Utf8>().toDartString(length: len);
+      _freeCstr(ptr);
+      return s;
+    } finally {
+      pkg_ffi.malloc.free(outStrPtr);
+      pkg_ffi.malloc.free(outLenPtr);
+    }
+  }
+
+  // Query realtime JSON for a handle
+  String? getRealtimeJson(ffi.Pointer<ffi.Void> handle) {
+    if (handle.address == 0) {
+      return '{"connected":false}';
+    }
+    final outStrPtr = pkg_ffi.malloc<ffi.Pointer<ffi.Int8>>();
+    final outLenPtr = pkg_ffi.malloc<ffi.Int32>();
+    try {
+      final ok = _getRealtime(handle, outStrPtr, outLenPtr);
+      if (ok == 0) return null;
+      final ptr = outStrPtr.value;
+      final len = outLenPtr.value;
+      final s = ptr.cast<pkg_ffi.Utf8>().toDartString(length: len);
+      _freeCstr(ptr);
+      return s;
+    } finally {
+      pkg_ffi.malloc.free(outStrPtr);
+      pkg_ffi.malloc.free(outLenPtr);
+    }
+  }
+
   // Dart-style aliases (preferred)
+  /// 打开串口连接（开发指南 3.1）。
+  ///
+  /// conn: 连接字符串，如 "COM3:115200"（串口:波特率）；
+  /// timeoutSeconds: 连接确认超时（秒）。
   ffi.Pointer<ffi.Void> openSerial(String conn, {int timeoutSeconds = 3}) {
     final connPtrUtf8 = conn.toNativeUtf8();
     final connPtr = connPtrUtf8.cast<ffi.Int8>();
@@ -319,6 +405,7 @@ class GReaderFfi {
   }
 
   // Non-blocking version using a background isolate.
+  /// 异步打开串口（避免阻塞 UI）。参数同 [openSerial]。
   Future<ffi.Pointer<ffi.Void>> openSerialAsync(
     String conn, {
     int timeoutSeconds = 3,
@@ -344,6 +431,8 @@ class GReaderFfi {
     int timeoutSeconds = 3,
   }) => openSerialAsync(conn, timeoutSeconds: timeoutSeconds);
 
+  /// 打开 TCP 客户端连接（开发指南 3.3）。
+  /// hostPort: "ip:port"，端口默认为 8160；timeoutSeconds: 秒。
   ffi.Pointer<ffi.Void> openTcp(String hostPort, {int timeoutSeconds = 3}) {
     final hpUtf8 = hostPort.toNativeUtf8();
     final hp = hpUtf8.cast<ffi.Int8>();
@@ -355,6 +444,7 @@ class GReaderFfi {
   }
 
   // Non-blocking version using a background isolate.
+  /// 异步打开 TCP（避免阻塞 UI）。参数同 [openTcp]。
   Future<ffi.Pointer<ffi.Void>> openTcpAsync(
     String hostPort, {
     int timeoutSeconds = 3,
@@ -370,6 +460,8 @@ class GReaderFfi {
   }
 
   // RS485
+  /// 打开 RS485 连接（开发指南 3.2）。
+  /// conn: "COMx:baud:addr"（串口:波特率:地址）；timeoutSeconds: 秒。
   ffi.Pointer<ffi.Void> openRs485(String conn, {int timeoutSeconds = 3}) {
     final p = conn.toNativeUtf8().cast<ffi.Int8>();
     try {
@@ -379,6 +471,7 @@ class GReaderFfi {
     }
   }
 
+  /// 异步打开 RS485。参数同 [openRs485]。
   Future<ffi.Pointer<ffi.Void>> openRs485Async(
     String conn, {
     int timeoutSeconds = 3,
@@ -391,6 +484,8 @@ class GReaderFfi {
   }
 
   // USB HID
+  /// 打开 USB HID（开发指南 3.6）。
+  /// path: 设备路径（可通过 [listUsbHid] 获取）；timeoutSeconds: 秒。
   ffi.Pointer<ffi.Void> openUsbHid(String path, {int timeoutSeconds = 3}) {
     final p = path.toNativeUtf8().cast<ffi.Int8>();
     try {
@@ -400,6 +495,7 @@ class GReaderFfi {
     }
   }
 
+  /// 异步打开 USB HID。参数同 [openUsbHid]。
   Future<ffi.Pointer<ffi.Void>> openUsbHidAsync(
     String path, {
     int timeoutSeconds = 3,
@@ -417,6 +513,8 @@ class GReaderFfi {
     return h;
   }
 
+  /// 枚举已连接的 USB HID 读写器设备路径。
+  /// 返回：设备路径列表，可直接传入 [openUsbHid]。
   List<String> listUsbHid() {
     final lenPtr = pkg_ffi.malloc<ffi.Int32>();
     try {
@@ -432,6 +530,7 @@ class GReaderFfi {
   }
 
   // Register native callbacks to queue events.
+  /// 注册原生回调，事件将入队，供 [eventsNextJson] 读取。
   void registerCallbacks(ffi.Pointer<ffi.Void> handle) {
     _registerCallbacks(handle);
   }
@@ -441,6 +540,7 @@ class GReaderFfi {
       registerCallbacks(handle);
 
   // Pop next JSON event; returns null if queue empty.
+  /// 弹出下一条事件 JSON（队列为空返回 null）。
   String? eventsNextJson(ffi.Pointer<ffi.Void> handle) {
     final outStrPtr = pkg_ffi.malloc<ffi.Pointer<ffi.Int8>>();
     final outLenPtr = pkg_ffi.malloc<ffi.Int32>();
@@ -463,6 +563,8 @@ class GReaderFfi {
   String? nextEventJson(ffi.Pointer<ffi.Void> handle) => eventsNextJson(handle);
 
   // BaseStop with error buffer.
+  /// 停止所有 RFID 操作（开发指南 6.2.1）。
+  /// 返回 RtCode=0 表示成功，error 为原生错误文本（UTF-8）。
   ({int code, String? error}) baseStop(ffi.Pointer<ffi.Void> handle) {
     final errBuf = pkg_ffi.malloc.allocate<ffi.Int8>(512);
     try {
@@ -479,6 +581,8 @@ class GReaderFfi {
   }
 
   // BaseSetPower for antenna 1 by default.
+  /// 配置指定天线的功率（开发指南 6.2.2）。
+  /// antennaNo: 天线号 1~16；power: 功率 0~33（单位依设备）。
   ({int code, String? error}) baseSetPower(
     ffi.Pointer<ffi.Void> handle, {
     int antennaNo = 1,
@@ -499,6 +603,15 @@ class GReaderFfi {
   }
 
   // Start EPC inventory with minimal params.
+  /// 启动 EPC 盘点（开发指南 6.2.6）。
+  /// 参数：
+  /// - antennaEnable: 天线位图（0x1=天线1，0x3=1+2 ...）。
+  /// - inventoryMode: 0=单次；1=连续。
+  /// - filterArea: 选择数据区（-1=不使用；0=保留；1=EPC；2=TID；3=用户）。
+  /// - filterHex: 选择内容（HEX），可空。
+  /// - filterBitStart: 匹配起始位（匹配 EPC 常用 32）。
+  /// - readTidLen: TID 读取字数（0=不读；>0 指定字数，常用 6）。
+  /// - timeoutMs: 指令超时（毫秒，0=默认）。
   ({int code, String? error}) inventoryEpcStart(
     ffi.Pointer<ffi.Void> handle, {
     required int antennaEnable,
@@ -537,6 +650,7 @@ class GReaderFfi {
   }
 
   // Start GB inventory with minimal params.
+  /// 启动 GB 盘点（开发指南 6.2.14）。参数：天线位图/模式/超时。
   ({int code, String? error}) inventoryGbStart(
     ffi.Pointer<ffi.Void> handle, {
     required int antennaEnable,
@@ -565,6 +679,7 @@ class GReaderFfi {
   }
 
   // Start GJB inventory with minimal params.
+  /// 启动 GJB 盘点（开发指南 6.2.18）。参数：天线位图/模式/超时。
   ({int code, String? error}) inventoryGjbStart(
     ffi.Pointer<ffi.Void> handle, {
     required int antennaEnable,
@@ -593,6 +708,7 @@ class GReaderFfi {
   }
 
   // Start TL inventory with minimal params.
+  /// 启动 TL 盘点（如适用）。参数：天线位图/模式/超时。
   ({int code, String? error}) inventoryTlStart(
     ffi.Pointer<ffi.Void> handle, {
     required int antennaEnable,
@@ -621,6 +737,16 @@ class GReaderFfi {
   }
 
   // Write EPC simplified wrapper.
+  /// 写 EPC（底层封装，开发指南 6.2.7）。
+  /// 参数：
+  /// - antennaEnable: 天线位图；
+  /// - area: 0=保留；1=EPC；2=TID；3=用户（写 EPC 区通常为 1）；
+  /// - startWord: 起始字地址；写 EPC 区：1=PC，2=EPC 首字；
+  /// - hexData: 写入的十六进制内容；
+  /// - passwordHex: 访问密码（8HEX，可空）；
+  /// - block: 0=整段写（建议）；非 0=分块写；
+  /// - stayCw: 完成后是否保持载波（0=否）；
+  /// - filterArea/filterHex/filterBitStart: 选择参数（建议按 TID 过滤）。
   ({int code, String? error}) writeEpc(
     ffi.Pointer<ffi.Void> handle, {
     required int antennaEnable,
@@ -669,6 +795,13 @@ class GReaderFfi {
   }
 
   // Lock EPC simplified wrapper.
+  /// 锁 EPC（开发指南 6.2.8）。
+  /// 参数：
+  /// - antennaEnable: 天线位图；
+  /// - area: 0=灭活密码；1=访问密码；2=EPC；3=TID；4=用户；
+  /// - mode: 0=解锁；1=锁定；2=永久解锁；3=永久锁定；
+  /// - passwordHex: 访问密码（可空）；
+  /// - filterArea/filterHex/filterBitStart: 选择参数（建议按 TID 过滤）。
   ({int code, String? error}) lockEpc(
     ffi.Pointer<ffi.Void> handle, {
     required int antennaEnable,
@@ -708,8 +841,10 @@ class GReaderFfi {
     }
   }
 
+  /// 开关原生诊断（OutputDebugString + 诊断事件）。
   void setVerboseLogging(bool enabled) => _setVerbose(enabled ? 1 : 0);
 
+  /// 将一条 JSON 文本写入全局诊断队列（用于调试）。
   void diagEmit(String json) {
     final p = json.toNativeUtf8().cast<ffi.Int8>();
     try {
@@ -730,6 +865,9 @@ class GReaderFfi {
 
 /// 事件枚举（来自原生回调的 JSON 字段 `type`）。
 enum GEventKind {
+  connected,
+  disconnected,
+  usbHidDisconnected,
   tagEpcLog,
   tagEpcOver,
   tagGbLog,
@@ -764,6 +902,12 @@ abstract class GEvent {
     }
     final t = (m['type'] ?? '').toString();
     switch (t) {
+      case 'Connected':
+        return GSimpleEvent(GEventKind.connected, m);
+      case 'Disconnected':
+        return GSimpleEvent(GEventKind.disconnected, m);
+      case 'UsbHidDisconnected':
+        return GSimpleEvent(GEventKind.usbHidDisconnected, m);
       case 'TagEpcLog':
         return GTagEpcLogEvent(
           epc: (m['epc'] ?? '').toString(),
@@ -860,6 +1004,13 @@ class GreaderPlugin {
 /// - await reader.registerCallbacks();
 /// - final r = reader.inventoryEpcStart(antennaEnable: 1);
 /// - reader.close();
+/// 高层易用封装：串行化原生调用、提供事件流与强类型事件，并补充常用便捷方法。
+///
+/// 打开示例：
+/// - HID: `final r = await GReader.openUsbHid(path)`；
+/// - 串口: `await GReader.openSerial('COM3:115200')`；
+/// - TCP: `await GReader.openTcp('192.168.1.168:8160')`；
+/// - RS485: `await GReader.openRs485('COM3:115200:1')`。
 class GReader {
   final GReaderFfi _ffi = GReaderFfi.instance;
   ffi.Pointer<ffi.Void> _handle;
@@ -872,6 +1023,9 @@ class GReader {
   static Timer? _diagTimer;
   // typed events: 直接由 JSON 流映射生成，避免重复定时器
   Stream<GEvent>? _typedEvents;
+  // lifecycle hooks
+  final StreamController<void> _onConnectCtrl = StreamController.broadcast();
+  final StreamController<void> _onDisconnectCtrl = StreamController.broadcast();
 
   GReader._(this._handle);
 
@@ -882,6 +1036,7 @@ class GReader {
   int get handleAddress => _handle.address; // 可选：仅用于调试显示
 
   // ---- Open helpers (async, 不阻塞 UI) ----
+  /// 打开串口（3.1）。conn: "COMx:baud"；timeoutSeconds: 秒。
   static Future<GReader> openSerial(
     String conn, {
     int timeoutSeconds = 3,
@@ -900,6 +1055,7 @@ class GReader {
     return inst;
   }
 
+  /// 打开 TCP 客户端（3.3）。hostPort: "ip:port"；timeoutSeconds: 秒。
   static Future<GReader> openTcp(
     String hostPort, {
     int timeoutSeconds = 3,
@@ -917,6 +1073,7 @@ class GReader {
     return inst;
   }
 
+  /// 打开 RS485（3.2）。conn: "COMx:baud:addr"；timeoutSeconds: 秒。
   static Future<GReader> openRs485(
     String conn, {
     int timeoutSeconds = 3,
@@ -934,6 +1091,7 @@ class GReader {
     return inst;
   }
 
+  /// 打开 USB HID（3.6）。path: 设备路径（见 [listUsbHid]）；timeoutSeconds: 秒。
   static Future<GReader> openUsbHid(
     String path, {
     int timeoutSeconds = 6,
@@ -953,9 +1111,11 @@ class GReader {
     return inst;
   }
 
+  /// 枚举 HID 设备路径列表。
   static List<String> listUsbHid() => GReaderFfi.instance.listUsbHid();
 
   // ---- Lifecycle ----
+  /// 关闭连接并释放资源；会停止事件派发并触发 onDisconnect。
   void close() {
     if (!isOpen) return;
     // stop event/diag dispatchers
@@ -965,14 +1125,42 @@ class GReader {
       _eventsCtrl?.close();
     } catch (_) {}
     _eventsCtrl = null;
+    // notify lifecycle
+    try {
+      _onDisconnectCtrl.add(null);
+    } catch (_) {}
+    // close lifecycle streams
+    try {
+      _onConnectCtrl.close();
+    } catch (_) {}
+    try {
+      _onDisconnectCtrl.close();
+    } catch (_) {}
     _ffi.close(_handle);
     _handle = ffi.Pointer.fromAddress(0);
   }
 
   // ---- Events ----
+  /// 注册原生回调并启动强类型事件生命周期钩子（建议在 open 成功后立即调用）。
   void registerCallbacks() {
     if (!isOpen) return;
     _ffi.registerCallbacks(_handle);
+    // ensure event stream started for lifecycle hooks
+    onEventTyped((e) {
+      switch (e.kind) {
+        case GEventKind.connected:
+          _onConnectCtrl.add(null);
+          break;
+        case GEventKind.disconnected:
+        case GEventKind.usbHidDisconnected:
+        case GEventKind.tcpDisconnected:
+        case GEventKind.usbHidRemoved:
+          _onDisconnectCtrl.add(null);
+          break;
+        default:
+          break;
+      }
+    });
   }
 
   String? nextEventJson() {
@@ -981,6 +1169,7 @@ class GReader {
   }
 
   // Start periodic drain of native event queue and push to Stream listeners.
+  /// 启动事件轮询派发（将原生事件队列转为 Dart Stream）。
   void startEventDispatch({
     Duration interval = const Duration(milliseconds: 30),
   }) {
@@ -1007,12 +1196,14 @@ class GReader {
   }
 
   // Stop the event timer (stream remains, can be re-used/restarted)
+  /// 停止事件轮询定时器（Stream 仍可保留并复用）。
   void stopEventDispatch() {
     _eventsTimer?.cancel();
     _eventsTimer = null;
   }
 
   // Get events stream; auto-start dispatch if needed.
+  /// 获取事件 JSON 流；首次访问会自动启动派发。
   Stream<String> events({
     Duration interval = const Duration(milliseconds: 30),
   }) {
@@ -1033,6 +1224,7 @@ class GReader {
   }
 
   // ---- Typed events (recommended) ----
+  /// 获取强类型事件流，自动将 JSON 映射为 `GEvent`。
   Stream<GEvent> eventsTyped({
     Duration interval = const Duration(milliseconds: 30),
   }) {
@@ -1050,6 +1242,7 @@ class GReader {
   }
 
   // Global diagnostics stream (library-wide), useful for debugging.
+  /// 启动全局诊断派发（库级别），将诊断事件转为 Stream。
   static void startDiagDispatch({
     Duration interval = const Duration(milliseconds: 80),
   }) {
@@ -1071,11 +1264,13 @@ class GReader {
     });
   }
 
+  /// 停止全局诊断派发。
   static void stopDiagDispatch() {
     _diagTimer?.cancel();
     _diagTimer = null;
   }
 
+  /// 全局诊断事件流；首次访问会自动启动派发。
   static Stream<String> diagEvents({
     Duration interval = const Duration(milliseconds: 80),
   }) {
@@ -1093,6 +1288,7 @@ class GReader {
   }
 
   // ---- Base operations ----
+  /// 停止所有 RFID 操作（6.2.1），高层封装（含诊断与串行化）。
   ({int code, String? error}) baseStop() {
     if (!isOpen) return (code: -1, error: 'not open');
     // diagnostics
@@ -1116,6 +1312,7 @@ class GReader {
   }
 
   // Async version: run in background isolate to avoid UI jank
+  /// 异步停止（避免阻塞 UI）。
   Future<({int code, String? error})> baseStopAsync() async {
     if (!isOpen) return (code: -1, error: 'not open');
     final addr = _handle.address;
@@ -1140,6 +1337,7 @@ class GReader {
     return res;
   }
 
+  /// 配置功率（6.2.2）。antennaNo: 1~16；power: 0~33。
   ({int code, String? error}) setPower({
     int antennaNo = 1,
     required int power,
@@ -1169,6 +1367,7 @@ class GReader {
     return res;
   }
 
+  /// 异步配置功率。
   Future<({int code, String? error})> setPowerAsync({
     int antennaNo = 1,
     required int power,
@@ -1304,6 +1503,7 @@ class GReader {
     return res;
   }
 
+  /// 启动 GB 盘点（6.2.14）。参数同 FFI 层。
   ({int code, String? error}) inventoryGbStart({
     required int antennaEnable,
     int inventoryMode = 1,
@@ -1320,6 +1520,7 @@ class GReader {
     );
   }
 
+  /// 启动 GJB 盘点（6.2.18）。参数同 FFI 层。
   ({int code, String? error}) inventoryGjbStart({
     required int antennaEnable,
     int inventoryMode = 1,
@@ -1336,6 +1537,7 @@ class GReader {
     );
   }
 
+  /// 启动 TL 盘点。参数同 FFI 层。
   ({int code, String? error}) inventoryTlStart({
     required int antennaEnable,
     int inventoryMode = 1,
@@ -1354,6 +1556,7 @@ class GReader {
 
   // ---- EPC ops ----
   // Helper: compute PC (2 bytes, 4 hex chars) from EPC hex length in words, like vendor sample.
+  /// 计算 EPC 的 PC 字（2 字节=4 HEX），按“EPC 字数 << 11”。
   static String computePcHexForEpc(String epcHex) {
     final clean = epcHex.replaceAll(RegExp(r"[^0-9A-Fa-f]"), '');
     if (clean.isEmpty || clean.length % 4 != 0) {
@@ -1367,6 +1570,9 @@ class GReader {
   }
 
   // Convenience: write with PC+EPC at startWord=1 (Area=EPC), optional filter.
+  /// 写 EPC 的推荐入口：自动拼 PC+EPC，并从 startWord=1 写入 EPC 区。
+  ///
+  /// 建议携带 TID 过滤（filterArea=2, filterHex=tid, filterBitStart=0），避免多标签误写。
   ({int code, String? error}) writeEpcWithPc({
     required int antennaEnable,
     required String epcHex,
@@ -1415,6 +1621,7 @@ class GReader {
     );
   }
 
+  /// 异步版本的 [writeEpcWithPc]。
   Future<({int code, String? error})> writeEpcWithPcAsync({
     required int antennaEnable,
     required String epcHex,
@@ -1461,6 +1668,7 @@ class GReader {
     );
   }
 
+  /// 低层直写接口（高级用法）。若需写 PC+EPC，请优先使用 [writeEpcWithPc]。
   ({int code, String? error}) writeEpc({
     required int antennaEnable,
     int area = 1,
@@ -1518,6 +1726,7 @@ class GReader {
     return res;
   }
 
+  /// 异步直写接口。
   Future<({int code, String? error})> writeEpcAsync({
     required int antennaEnable,
     int area = 1,
@@ -1577,6 +1786,7 @@ class GReader {
     return res;
   }
 
+  /// 锁 EPC。area/mode 见 6.2.8；建议配合 TID 过滤。
   ({int code, String? error}) lockEpc({
     required int antennaEnable,
     int area = 1,
@@ -1625,6 +1835,7 @@ class GReader {
     return res;
   }
 
+  /// 异步锁 EPC。
   Future<({int code, String? error})> lockEpcAsync({
     required int antennaEnable,
     int area = 1,
@@ -1692,4 +1903,33 @@ class GReader {
       GReaderFfi.instance.setVerboseLogging(enabled);
 
   static String? nextDiagEventJson() => GReaderFfi.instance.diagNextJson();
+
+  // ---- Status API ----
+  /// 查询基础状态（不会阻塞 UI）。字段：connected/readerName/transport/isUsbHid。
+  Future<Map<String, dynamic>?> getStatus() async {
+    if (!isOpen) return {'connected': false};
+    final json = _ffi.getStatusJson(_handle);
+    if (json == null || json.isEmpty) return null;
+    try {
+      return convert.jsonDecode(json) as Map<String, dynamic>;
+    } catch (_) {
+      return {'connected': isOpen};
+    }
+  }
+
+  /// 查询实时信息快照：包含 capabilities/power/freq/baseband/gpi/readerInfo/pendingEvents。
+  Future<Map<String, dynamic>?> getRealtime() async {
+    if (!isOpen) return {'connected': false};
+    final json = _ffi.getRealtimeJson(_handle);
+    if (json == null || json.isEmpty) return null;
+    try {
+      return convert.jsonDecode(json) as Map<String, dynamic>;
+    } catch (_) {
+      return {'connected': isOpen};
+    }
+  }
+
+  // ---- Lifecycle hooks ----
+  Stream<void> onConnect() => _onConnectCtrl.stream;
+  Stream<void> onDisconnect() => _onDisconnectCtrl.stream;
 }

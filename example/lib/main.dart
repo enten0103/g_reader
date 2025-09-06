@@ -42,6 +42,20 @@ class _MyAppState extends State<MyApp> {
   final _pwdHexCtrl = TextEditingController(text: '00000000');
   String? _lastTid;
 
+  // 将 Map/String JSON 美化为多行缩进文本
+  String _prettyJson(dynamic data) {
+    try {
+      final encoder = convert.JsonEncoder.withIndent('  ');
+      if (data is String) {
+        final obj = convert.jsonDecode(data);
+        return encoder.convert(obj);
+      }
+      return encoder.convert(data);
+    } catch (_) {
+      return data?.toString() ?? '';
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -360,6 +374,54 @@ class _MyAppState extends State<MyApp> {
                 runSpacing: 8,
                 children: [
                   ElevatedButton(
+                    onPressed: _busy || _reader?.isOpen != true
+                        ? null
+                        : () async {
+                            setState(() => _busy = true);
+                            try {
+                              final st = await _reader!.getStatus();
+                              if (!mounted) return;
+                              setState(() {
+                                _status =
+                                    'Status: ${convert.jsonEncode(st ?? {'connected': false})}';
+                              });
+                              _pushEventUnique(
+                                convert.jsonEncode({
+                                  'type': 'Status',
+                                  'data': st ?? {'connected': false},
+                                }),
+                              );
+                            } finally {
+                              if (mounted) setState(() => _busy = false);
+                            }
+                          },
+                    child: const Text('Query Status'),
+                  ),
+                  ElevatedButton(
+                    onPressed: _busy || _reader?.isOpen != true
+                        ? null
+                        : () async {
+                            setState(() => _busy = true);
+                            try {
+                              final rt = await _reader!.getRealtime();
+                              if (!mounted) return;
+                              setState(() {
+                _status = 'Realtime:\n' +
+                  _prettyJson(rt ?? {'connected': false});
+                              });
+                              _pushEventUnique(
+                                convert.jsonEncode({
+                                  'type': 'Realtime',
+                                  'data': rt ?? {'connected': false},
+                                }),
+                              );
+                            } finally {
+                              if (mounted) setState(() => _busy = false);
+                            }
+                          },
+                    child: const Text('Query Realtime'),
+                  ),
+                  ElevatedButton(
                     onPressed: () async {
                       if (_reader?.isOpen != true) return;
                       if (_busy) return;
@@ -612,7 +674,23 @@ class _MyAppState extends State<MyApp> {
                 ],
               ),
               const SizedBox(height: 12),
-              Text('Status: $_status'),
+              const Text('Status:'),
+              const SizedBox(height: 6),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.black12),
+                  color: const Color(0xFFF8F8F8),
+                ),
+                child: SelectableText(
+                  _status,
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    height: 1.25,
+                  ),
+                ),
+              ),
               const SizedBox(height: 12),
               const Text('Events:'),
               Row(
@@ -728,6 +806,15 @@ class _MyAppState extends State<MyApp> {
         if (ev is GTagEpcLogEvent && ev.tid != null && ev.tid!.isNotEmpty) {
           _lastTid = ev.tid;
         }
+        if (mounted) setState(() {});
+      });
+      // Lifecycle hooks (demo):
+      _reader!.onConnect().listen((_) {
+        _pushEventUnique('{"type":"onConnect"}');
+        if (mounted) setState(() {});
+      });
+      _reader!.onDisconnect().listen((_) {
+        _pushEventUnique('{"type":"onDisconnect"}');
         if (mounted) setState(() {});
       });
     }

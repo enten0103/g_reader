@@ -156,13 +156,21 @@ final sub = reader.onEventTyped((ev) {
 
 ## API 速览（高层 GReader）
 
-- 打开/关闭
+- 打开/关闭（参数说明）
 	- `static Future<GReader> openUsbHid(String path, {int timeoutSeconds=6})`
+		- path: USBHID 设备路径（可通过 `listUsbHid()` 获取）；
+		- timeoutSeconds: 连接确认超时（秒）。
 	- `static Future<GReader> openSerial(String conn, {int timeoutSeconds=3})`
+		- conn: 串口连接字符串，如 `COM3:115200`；
+		- timeoutSeconds: 秒。
 	- `static Future<GReader> openTcp(String hostPort, {int timeoutSeconds=3})`
+		- hostPort: `ip:port`（默认 8160）；
+		- timeoutSeconds: 秒。
 	- `static Future<GReader> openRs485(String conn, {int timeoutSeconds=3})`
-	- `static List<String> listUsbHid()`
-	- `void close()`
+		- conn: `COMx:baud:addr`；
+		- timeoutSeconds: 秒。
+	- `static List<String> listUsbHid()` 返回 HID 设备路径列表。
+	- `void close()` 关闭连接并释放资源。
 	- 状态：`isOpen`, `isClosed`, `handleAddress`
 
 - 事件
@@ -176,21 +184,132 @@ final sub = reader.onEventTyped((ev) {
 	- `({int code, String? error}) baseStop()` / `Future<...> baseStopAsync()`
 	- `({int code, String? error}) setPower({int antennaNo=1, required int power})` / `Future<...> setPowerAsync(...)`
 
-- 盘点
-	- `({int code, String? error}) inventoryEpcStart({required int antennaEnable, int inventoryMode=1, int filterArea=-1, String? filterHex, int filterBitStart=0, int readTidLen=0, int timeoutMs=0})`
-	- `Future<...> inventoryEpcStartAsync({...})`
-	- `inventoryGbStart`, `inventoryGjbStart`, `inventoryTlStart`（国标/军标/TL）
+- 盘点（参数说明）
+		- `({int code, String? error}) inventoryEpcStart({
+				required int antennaEnable,
+				int inventoryMode=1,
+				int filterArea=-1,
+				String? filterHex,
+				int filterBitStart=0,
+				int readTidLen=0,
+				int timeoutMs=0,
+			})`
+				- antennaEnable: 天线位图（0x1=天线1，0x3=1+2 ...）；
+				- inventoryMode: 0=单次；1=连续；
+				- filterArea: -1=不使用；0=保留；1=EPC；2=TID；3=用户；
+				- filterHex: 选择内容（HEX），为空表示不使用过滤；
+				- filterBitStart: 匹配起始位（匹配 EPC 常用 32）；
+				- readTidLen: TID 读取字数（0=不读；>0 指定，常用 6）；
+				- timeoutMs: 指令超时（毫秒，0=默认）。
+		- `Future<...> inventoryEpcStartAsync({...})` 异步版本。
+		- `inventoryGbStart`, `inventoryGjbStart`, `inventoryTlStart`（国标/军标/TL），参数为：天线位图/模式/超时。
 
-- EPC 写/锁
-	- `static String computePcHexForEpc(String epcHex)`：根据 EPC 字数计算 PC（4个hex）。
-	- `writeEpcWithPc(...)` / `writeEpcWithPcAsync(...)`：推荐入口，自动拼 PC+EPC，从 `startWord=1` 写入。
-	- `writeEpc(...)` / `writeEpcAsync(...)`：底层直写接口（高级用法）。
-	- `lockEpc(...)` / `lockEpcAsync(...)`：锁 EPC。
+- EPC 写/锁（参数说明与建议）
+	- `static String computePcHexForEpc(String epcHex)`：根据 EPC 字数计算 PC（4 个 HEX）。
+	- `writeEpcWithPc({required int antennaEnable, required String epcHex, String passwordHex='', int block=0, int stayCw=0, int filterArea=-1, String? filterHex, int filterBitStart=0})`
+		- 从 `startWord=1` 写入 PC+EPC（推荐）；
+		- 建议过滤：`filterArea=2, filterHex=tid, filterBitStart=0`（按 TID 精确选中目标标签）。
+	- `writeEpc({required int antennaEnable, int area=1, int startWord=2, required String hexData, String passwordHex='', int block=1, int stayCw=0, int filterArea=-1, String? filterHex, int filterBitStart=0})`
+		- 直写接口：area=EPC(1)；写 PC+EPC 时从 `startWord=1`；
+		- block: 0=整段写（建议）；非 0=分块写；
+		- passwordHex: 8 个 HEX，可空。
+	- `lockEpc({required int antennaEnable, int area=1, required int mode, String passwordHex='', int filterArea=-1, String? filterHex, int filterBitStart=0})`
+		- area: 0=灭活密码；1=访问密码；2=EPC；3=TID；4=用户；
+		- mode: 0=解锁；1=锁定；2=永久解锁；3=永久锁定；
+		- 建议：按 TID 过滤，避免误锁。
 
 - 诊断
 	- `static void setVerboseLogging(bool enabled)`
 	- `static String? nextDiagEventJson()`（兼容用途，已不推荐）
 	- `static StreamSubscription<String> onDiag(void Function(String) listener)` / `static Stream<String> diagEvents()`
+
+## 状态与实时信息（Status / Realtime）
+
+提供轻量的状态查询与丰富的实时快照，便于做 UI 展示与自检。
+
+### 基础状态 getStatus()
+
+返回当前句柄状态与连接信息（不会阻塞）：
+
+```dart
+final st = await reader.getStatus();
+// 形如：
+// {
+//   "connected": true,
+//   "readerName": "COM3:115200" | "\\\\?\\hid#vid_...", // 打开时的标识
+//   "transport": "rs232" | "tcp" | "rs485" | "usbhid",
+//   "isUsbHid": true/false
+// }
+```
+
+### 实时快照 getRealtime()
+
+在串行工作线程上依次查询多项信息并合并为 JSON（小体量、数百字节量级）：
+
+```dart
+final rt = await reader.getRealtime();
+// 示例返回（字段会随固件而异）：
+// {
+//   "connected": true,
+//   "readerName": "...",
+//   "transport": "usbhid",
+//   "isUsbHid": true,
+//   "capabilities": { "maxPower": 30, "minPower": 5, "antennaCount": 4 },
+//   "power": [ { "antenna": 1, "read": 20 }, { "antenna": 2, "read": 20 } ],
+//   "freqRangeIndex": 2,
+//   "baseband": { "baseSpeed": 1, "qValue": 4, "session": 1, "inventoryFlag": 2 },
+//   "gpi": [ { "port": 1, "level": 0 } ],
+//   "readerInfo": { "serial": "SN...", "appVersion": "0.1.0.0", "powerOnTime": "2025-09-06 ..." },
+//   "pendingEvents": 0
+// }
+```
+
+提示与排错：
+- 必须先成功打开设备；对 HID 设备建议在 open 后稍作延时（插件已在原生侧做最小等待）。
+- 若只看到 `{"connected": true}`，多半是 JSON 被上层兜底（例如路径中含反斜杠/非 UTF-8 导致解析失败，现已在原生侧做了 UTF‑8 转换与转义）。请更新为当前版本并重试。
+- 少数字段取决于固件能力，旧固件可能缺省或为默认值。
+
+
+## 速查卡（参数对照）📌
+
+与开发指南一致的核心参数映射，适用于 Dart 高层与 FFI 层 API：
+
+- 天线位图 antennaEnable
+	- 按位启用天线（0x1=1 号，0x2=2 号，0x3=1+2，类推）。
+
+- 过滤参数（选择器）
+	- filterArea：-1 不使用；0 保留；1 EPC；2 TID；3 用户。
+	- filterHex：匹配内容（HEX 字符串）。
+	- filterBitStart：起始位，匹配 EPC 时常用 32。
+
+- TID 读取（盘点可选项）
+	- readTidLen：单位为字（word=16bit）；0 不读，>0 指定字数（常用 6）。
+
+- 写 EPC
+	- area：1=EPC 区（默认）。
+	- startWord：1=PC，2=EPC 首字；写 PC+EPC 时推荐从 1 开始。
+	- passwordHex：访问密码（8 个 HEX，32bit），空串为无密码。
+	- block：0 整段写（建议）；非 0 分块写。
+	- stayCw：0 正常收尾；1 保持载波（通常不需要）。
+
+- 锁 EPC
+	- area：0 灭活密码；1 访问密码；2 EPC；3 TID；4 用户。
+	- mode：0 解锁；1 锁定；2 永久解锁；3 永久锁定。
+
+提示：为避免多标签误写/误锁，强烈建议按 TID 精确过滤（filterArea=2, filterHex=tid, filterBitStart=0）。
+
+### 生命周期钩子（Hooks）
+
+无需解析事件即可感知连接/断开：
+
+```dart
+reader.onConnect().listen((_) {
+	// 已连接，可刷新状态/实时信息
+});
+reader.onDisconnect().listen((_) {
+	// 已断开（含 TCP 断线 / HID 拔出）
+});
+```
 
 ## 关键注意事项（必读）
 
