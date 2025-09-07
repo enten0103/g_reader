@@ -1924,7 +1924,11 @@ class GReader {
   /// 查询基础状态（不会阻塞 UI）。字段：connected/readerName/transport/isUsbHid。
   Future<Map<String, dynamic>?> getStatus() async {
     if (!isOpen) return {'connected': false};
-    final json = _ffi.getStatusJson(_handle);
+    // 在后台 isolate 调用以避免阻塞 UI
+    final addr = _handle;
+    final json = await Isolate.run(() {
+      return GReaderFfi.instance.getStatusJson(addr);
+    });
     if (json == null || json.isEmpty) return null;
     try {
       return convert.jsonDecode(json) as Map<String, dynamic>;
@@ -1936,7 +1940,11 @@ class GReader {
   /// 查询实时信息快照：包含 capabilities/power/freq/baseband/gpi/readerInfo/pendingEvents。
   Future<Map<String, dynamic>?> getRealtime() async {
     if (!isOpen) return {'connected': false};
-    final json = _ffi.getRealtimeJson(_handle);
+    // 在后台 isolate 调用以避免阻塞 UI（TCP 下合并查询可能较慢）
+    final addr = _handle;
+    final json = await Isolate.run(() {
+      return GReaderFfi.instance.getRealtimeJson(addr);
+    });
     if (json == null || json.isEmpty) return null;
     try {
       return convert.jsonDecode(json) as Map<String, dynamic>;

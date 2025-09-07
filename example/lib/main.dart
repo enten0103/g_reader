@@ -772,7 +772,8 @@ class _MyAppState extends State<MyApp> {
                         filterBitStart: 0,
                       );
                       setState(() {
-                        _status = 'WriteEPC (Filter TID:${tid ?? '-'}) code=${r.code} ${r.error ?? ''} (mask=0x${mask.toRadixString(16)})';
+                        _status =
+                            'WriteEPC (Filter TID:${tid ?? '-'}) code=${r.code} ${r.error ?? ''} (mask=0x${mask.toRadixString(16)})';
                       });
                     },
                     child: const Text('WriteEPC (Filter TID)'),
